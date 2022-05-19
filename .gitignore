@@ -1,0 +1,17 @@
+
+# dataset files
+/glue_data
+*.json
+*.jsonl
+*.bin
+*.tsv
+*.csv
+glove*.txt
+vocab.txt
+
+# result files
+eval_*.txt
+*.out
+
+# pycache
+__pycache__
