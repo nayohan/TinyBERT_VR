@@ -700,6 +700,7 @@ class BertPreTrainedModel(nn.Module):
             weights_path = os.path.join(
                 pretrained_model_name_or_path, TF_WEIGHTS_NAME)
             return load_tf_weights_in_bert(model, weights_path)
+
         # Load from a PyTorch state_dict
         old_keys = []
         new_keys = []
@@ -712,6 +713,20 @@ class BertPreTrainedModel(nn.Module):
             if new_key:
                 old_keys.append(key)
                 new_keys.append(new_key)
+        for old_key, new_key in zip(old_keys, new_keys):
+            state_dict[new_key] = state_dict.pop(old_key)
+
+        # Fix missmatch layer name. Two situation like (BERT->TinyBERT) and (TinyBERT->TinyBERT).
+        old_keys = []
+        new_keys = []
+        for key in state_dict.keys():
+            if 'bert' in key:
+                new_key = key
+            else:
+                new_key = 'bert.' +key
+            old_keys.append(key)
+            new_keys.append(new_key)
+
         for old_key, new_key in zip(old_keys, new_keys):
             state_dict[new_key] = state_dict.pop(old_key)
 
