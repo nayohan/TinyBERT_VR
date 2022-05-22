@@ -42,6 +42,7 @@ from transformer.tokenization import BertTokenizer
 from transformer.optimization import BertAdam
 from transformer.file_utils import WEIGHTS_NAME, CONFIG_NAME
 
+os.environ["CUDA_VISIBLE_DEVICES"]="0"
 csv.field_size_limit(sys.maxsize)
 
 log_format = '%(asctime)s %(message)s'
@@ -824,6 +825,7 @@ def main():
     output_mode = output_modes[task_name]
     label_list = processor.get_labels()
     num_labels = len(label_list)
+    print("num_labels:", num_labels)
 
     tokenizer = BertTokenizer.from_pretrained(args.student_model, do_lower_case=args.do_lower_case)
 
@@ -875,9 +877,9 @@ def main():
         logger.info("  Num examples = %d", len(train_examples))
         logger.info("  Batch size = %d", args.train_batch_size)
         logger.info("  Num steps = %d", num_train_optimization_steps)
-        if n_gpu > 1:
-            student_model = torch.nn.DataParallel(student_model)
-            teacher_model = torch.nn.DataParallel(teacher_model)
+        # if n_gpu > 1:
+        #     student_model = torch.nn.parallel.DistributedDataParallel(student_model, device_ids=[2])
+        #     teacher_model = torch.nn.parallel.DataParallel(teacher_model, device_ids=[3])
         # Prepare optimizer
         param_optimizer = list(student_model.named_parameters())
         size = 0
@@ -932,11 +934,26 @@ def main():
                 rep_loss = 0.
                 cls_loss = 0.
 
-                student_logits, student_atts, student_reps = student_model(input_ids, segment_ids, input_mask,
-                                                                           is_student=True)
+                student_logits, student_atts, student_reps, student_query_layers, student_key_layers, student_value_layers = \
+                    student_model(input_ids, segment_ids, input_mask, is_student=True)
+
+                print('student_logits:', student_logits)
+                print('student_atts:', student_atts)
+                print('student_reps:', student_reps)
+                print('student_query_layers:', student_query_layers)
+                print('student_key_layers:', student_key_layers)
+                print('student_value_layers:', student_value_layers)
 
                 with torch.no_grad():
-                    teacher_logits, teacher_atts, teacher_reps = teacher_model(input_ids, segment_ids, input_mask)
+                    teacher_logits, teacher_atts, teacher_reps, teacher_query_layers, teacher_key_layers, teacher_value_layers = \
+                        teacher_model(input_ids, segment_ids, input_mask)
+
+                print('teacher_logits:', teacher_logits)
+                print('teacher_atts:', teacher_atts)
+                print('teacher_reps:', teacher_reps)
+                print('teacher_query_layers:', teacher_query_layers)
+                print('teacher_key_layers:', teacher_key_layers)
+                print('teacher_value_layers:', teacher_value_layers)
 
                 if not args.pred_distill:
                     teacher_layer_num = len(teacher_atts)
@@ -961,7 +978,7 @@ def main():
                         tmp_loss = loss_mse(student_rep, teacher_rep)
                         rep_loss += tmp_loss
 
-                    loss = rep_loss + att_loss
+                    loss = rep_loss + att_loss # + vr_loss
                     tr_att_loss += att_loss.item()
                     tr_rep_loss += rep_loss.item()
                 else:

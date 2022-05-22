@@ -388,7 +388,7 @@ class BertSelfAttention(nn.Module):
         x = x.view(*new_x_shape)
         return x.permute(0, 2, 1, 3)
 
-    def forward(self, hidden_states, attention_mask, output_att=False):
+    def forward(self, hidden_states, attention_mask, output_att=False, last_layer_or_is_student=False):
         mixed_query_layer = self.query(hidden_states)
         mixed_key_layer = self.key(hidden_states)
         mixed_value_layer = self.value(hidden_states)
@@ -417,7 +417,11 @@ class BertSelfAttention(nn.Module):
         new_context_layer_shape = context_layer.size()[
             :-2] + (self.all_head_size,)
         context_layer = context_layer.view(*new_context_layer_shape)
-        return context_layer, attention_scores
+        print('last_layer_or_is_student:', last_layer_or_is_student)
+        if not last_layer_or_is_student:
+            return context_layer, attention_scores
+        else:
+            return context_layer, attention_scores, query_layer, key_layer, value_layer
 
 
 class BertAttention(nn.Module):
@@ -427,10 +431,22 @@ class BertAttention(nn.Module):
         self.self = BertSelfAttention(config)
         self.output = BertSelfOutput(config)
 
-    def forward(self, input_tensor, attention_mask):
-        self_output, layer_att = self.self(input_tensor, attention_mask)
+    def forward(self, input_tensor, attention_mask, last_layer_or_is_student):
+        print('last_layer_or_is_student:', last_layer_or_is_student)
+
+        _self_output = self.self(input_tensor, attention_mask, last_layer_or_is_student=last_layer_or_is_student)
+
+        if not last_layer_or_is_student:
+            self_output, layer_att = _self_output
+        else:
+            self_output, layer_att, query_layer, key_layer, value_layer = _self_output
+        
         attention_output = self.output(self_output, input_tensor)
-        return attention_output, layer_att
+
+        if not last_layer_or_is_student:
+            return attention_output, layer_att
+        else:
+            return attention_output, layer_att, query_layer, key_layer, value_layer
 
 
 class BertSelfOutput(nn.Module):
@@ -491,13 +507,21 @@ class BertLayer(nn.Module):
         self.intermediate = BertIntermediate(config)
         self.output = BertOutput(config)
 
-    def forward(self, hidden_states, attention_mask):
-        attention_output, layer_att = self.attention(
-            hidden_states, attention_mask)
+    def forward(self, hidden_states, attention_mask, last_layer_or_is_student):
+        if not last_layer_or_is_student:
+            attention_output, layer_att = self.attention(
+                hidden_states, attention_mask, last_layer_or_is_student)
+        else:
+            attention_output, layer_att, query_layer, key_layer, value_layer = self.attention(
+                hidden_states, attention_mask, last_layer_or_is_student)
+
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
 
-        return layer_output, layer_att
+        if not last_layer_or_is_student:
+            return layer_output, layer_att
+        else:
+            return layer_output, layer_att, query_layer, key_layer, value_layer
 
 
 class BertEncoder(nn.Module):
@@ -506,17 +530,26 @@ class BertEncoder(nn.Module):
         self.layer = nn.ModuleList([BertLayer(config)
                                     for _ in range(config.num_hidden_layers)])
 
-    def forward(self, hidden_states, attention_mask):
+    def forward(self, hidden_states, attention_mask, is_student):
         all_encoder_layers = []
         all_encoder_atts = []
-        for _, layer_module in enumerate(self.layer):
+        all_key_layers = []
+        all_query_layers = []
+        all_value_layers = []
+        for i, layer_module in enumerate(self.layer):
             all_encoder_layers.append(hidden_states)
-            hidden_states, layer_att = layer_module(
-                hidden_states, attention_mask)
+            if i == len(self.layer) - 1 or is_student:
+                hidden_states, layer_att, query_layer, key_layer, value_layer = layer_module(
+                    hidden_states, attention_mask, True)
+                all_key_layers.append(query_layer)
+                all_query_layers.append(key_layer)
+                all_value_layers.append(value_layer)
+            else:
+                hidden_states, layer_att = layer_module(
+                    hidden_states, attention_mask, False)
             all_encoder_atts.append(layer_att)
-
         all_encoder_layers.append(hidden_states)
-        return all_encoder_layers, all_encoder_atts
+        return all_encoder_layers, all_encoder_atts, all_query_layers, all_key_layers, all_value_layers
 
 
 class BertPooler(nn.Module):
@@ -821,7 +854,7 @@ class BertModel(BertPreTrainedModel):
         self.apply(self.init_bert_weights)
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None,
-                output_all_encoded_layers=True, output_att=True):
+                output_all_encoded_layers=True, output_att=True, is_student=False):
 
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
@@ -845,8 +878,8 @@ class BertModel(BertPreTrainedModel):
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
         embedding_output = self.embeddings(input_ids, token_type_ids)
-        encoded_layers, layer_atts = self.encoder(embedding_output,
-                                                  extended_attention_mask)
+        encoded_layers, layer_atts, query_layers, key_layers, value_layers = self.encoder(embedding_output,
+                                                  extended_attention_mask, is_student=is_student)
 
         pooled_output = self.pooler(encoded_layers)
         if not output_all_encoded_layers:
@@ -855,7 +888,7 @@ class BertModel(BertPreTrainedModel):
         if not output_att:
             return encoded_layers, pooled_output
 
-        return encoded_layers, layer_atts, pooled_output
+        return encoded_layers, layer_atts, pooled_output, query_layers, key_layers, value_layers
 
 
 class BertForPreTraining(BertPreTrainedModel):
@@ -953,14 +986,13 @@ class TinyBertForPreTraining(BertPreTrainedModel):
     def forward(self, input_ids, token_type_ids=None,
                 attention_mask=None, masked_lm_labels=None,
                 next_sentence_label=None, labels=None):
-        sequence_output, att_output, pooled_output = self.bert(
-            input_ids, token_type_ids, attention_mask)
+        sequence_output, att_output, pooled_output, query_layers, key_layers, value_layers = self.bert(input_ids, token_type_ids, attention_mask)
         tmp = []
         for s_id, sequence_layer in enumerate(sequence_output):
             tmp.append(self.fit_dense(sequence_layer))
         sequence_output = tmp
 
-        return att_output, sequence_output
+        return att_output, sequence_output, query_layers, key_layers, value_layers
 
 
 class BertForMaskedLM(BertPreTrainedModel):
@@ -1144,8 +1176,8 @@ class TinyBertForSequenceClassification(BertPreTrainedModel):
     def forward(self, input_ids, token_type_ids=None, attention_mask=None,
                 labels=None, is_student=False):
 
-        sequence_output, att_output, pooled_output = self.bert(input_ids, token_type_ids, attention_mask,
-                                                               output_all_encoded_layers=True, output_att=True)
+        sequence_output, att_output, pooled_output, query_layers, key_layers, value_layers = \
+            self.bert(input_ids, token_type_ids, attention_mask, output_all_encoded_layers=True, output_att=True, is_student=is_student)
 
         logits = self.classifier(torch.relu(pooled_output))
 
@@ -1154,4 +1186,4 @@ class TinyBertForSequenceClassification(BertPreTrainedModel):
             for s_id, sequence_layer in enumerate(sequence_output):
                 tmp.append(self.fit_dense(sequence_layer))
             sequence_output = tmp
-        return logits, att_output, sequence_output
+        return logits, att_output, sequence_output, query_layers, key_layers, value_layers
