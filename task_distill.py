@@ -26,14 +26,16 @@ import logging
 import os
 import random
 import sys
+import math
 
 import numpy as np
 import torch
+import  torch.nn.functional as F
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
 from tqdm import tqdm, trange
 
-from torch.nn import CrossEntropyLoss, MSELoss
+from torch.nn import CrossEntropyLoss, MSELoss, KLDivLoss
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import matthews_corrcoef, f1_score
 
@@ -600,7 +602,7 @@ def get_tensor_data(output_mode, features):
 def result_to_file(result, file_name):
     with open(file_name, "a") as writer:
         logger.info("***** Eval results *****")
-        for key in sorted(result.keys()):
+        for key in result.keys():
             logger.info("  %s = %s", key, str(result[key]))
             writer.write("%s = %s\n" % (key, str(result[key])))
 
@@ -616,7 +618,7 @@ def do_eval(model, task_name, eval_dataloader,
         with torch.no_grad():
             input_ids, input_mask, segment_ids, label_ids, seq_lengths = batch_
 
-            logits, _, _ = model(input_ids, segment_ids, input_mask)
+            logits, _, _, _, _, _ = model(input_ids, segment_ids, input_mask)
 
         # create eval loss and other metric required by the task
         if output_mode == "classification":
@@ -858,9 +860,11 @@ def main():
     if not args.do_eval:
         teacher_model = TinyBertForSequenceClassification.from_pretrained(args.teacher_model, num_labels=num_labels)
         teacher_model.to(device)
+        args.teacher_config = teacher_model.config
 
     student_model = TinyBertForSequenceClassification.from_pretrained(args.student_model, num_labels=num_labels)
     student_model.to(device)
+    args.student_config = student_model.config
     if args.do_eval:
         logger.info("***** Running evaluation *****")
         logger.info("  Num examples = %d", len(eval_examples))
@@ -903,6 +907,7 @@ def main():
                              t_total=num_train_optimization_steps)
         # Prepare loss functions
         loss_mse = MSELoss()
+        loss_fct = KLDivLoss(log_target=True)# if not args.mlm_loss else CrossEntropyLoss(ignore_index=-1)
 
         def soft_cross_entropy(predicts, targets):
             student_likelihood = torch.nn.functional.log_softmax(predicts, dim=-1)
@@ -919,6 +924,7 @@ def main():
             tr_att_loss = 0.
             tr_rep_loss = 0.
             tr_cls_loss = 0.
+            tr_vr_loss = 0.
 
             student_model.train()
             nb_tr_examples, nb_tr_steps = 0, 0
@@ -930,57 +936,112 @@ def main():
                 if input_ids.size()[0] != args.train_batch_size:
                     continue
 
-                att_loss = 0.
-                rep_loss = 0.
-                cls_loss = 0.
-
                 student_logits, student_atts, student_reps, student_query_layers, student_key_layers, student_value_layers = \
                     student_model(input_ids, segment_ids, input_mask, is_student=True)
 
-                print('student_logits:', student_logits)
-                print('student_atts:', student_atts)
-                print('student_reps:', student_reps)
-                print('student_query_layers:', student_query_layers)
-                print('student_key_layers:', student_key_layers)
-                print('student_value_layers:', student_value_layers)
+                # print('student_logits:', student_logits.size())
+                # print('student_atts:', len(student_atts))
+                # print('student_atts[0]:', student_atts[0].size())
+                # print('student_reps:', len(student_reps))
+                # print('student_reps[0]:', student_reps[0].size())
+        
+                # print('student_query_layers:', len(student_query_layers))
+                # print('student_query_layers[0]:', student_query_layers[0].size())
+                # print('student_key_layers:', len(student_key_layers))
+                # print('student_key_layers[0]:', student_key_layers[0].size())
+                # print('student_value_layers:', len(student_value_layers))
+                # print('student_value_layers[0]:', student_value_layers[0].size())
 
                 with torch.no_grad():
                     teacher_logits, teacher_atts, teacher_reps, teacher_query_layers, teacher_key_layers, teacher_value_layers = \
                         teacher_model(input_ids, segment_ids, input_mask)
 
-                print('teacher_logits:', teacher_logits)
-                print('teacher_atts:', teacher_atts)
-                print('teacher_reps:', teacher_reps)
-                print('teacher_query_layers:', teacher_query_layers)
-                print('teacher_key_layers:', teacher_key_layers)
-                print('teacher_value_layers:', teacher_value_layers)
+                # print('teacher_logits:', teacher_logits.size())
+                # print('teacher_atts:', len(teacher_atts))
+                # print('teacher_atts[0]:', teacher_atts[0].size())
+                # print('teacher_reps:', len(teacher_reps))
+                # print('teacher_reps[0]:', teacher_reps[0].size())
+        
+                # print('teacher_query_layers:', len(teacher_query_layers))
+                # print('teacher_query_layers[0]:', teacher_query_layers[0].size())
+                # print('teacher_key_layers:', len(teacher_key_layers))
+                # print('teacher_key_layers[0]:', teacher_key_layers[0].size())
+                # print('teacher_value_layers:', len(teacher_value_layers))
+                # print('teacher_value_layers[0]:', teacher_value_layers[0].size())
 
+                att_loss = 0.
+                rep_loss = 0.
+                cls_loss = 0.
+                vr_loss = 0.
+
+                tinybert=0
                 if not args.pred_distill:
-                    teacher_layer_num = len(teacher_atts)
-                    student_layer_num = len(student_atts)
-                    assert teacher_layer_num % student_layer_num == 0
-                    layers_per_block = int(teacher_layer_num / student_layer_num)
-                    new_teacher_atts = [teacher_atts[i * layers_per_block + layers_per_block - 1]
-                                        for i in range(student_layer_num)]
+                    if tinybert:
+                        teacher_layer_num = len(teacher_atts)
+                        student_layer_num = len(student_atts)
+                        assert teacher_layer_num % student_layer_num == 0
+                        layers_per_block = int(teacher_layer_num / student_layer_num)
+                        new_teacher_atts = [teacher_atts[i * layers_per_block + layers_per_block - 1]
+                                            for i in range(student_layer_num)]
 
-                    for student_att, teacher_att in zip(student_atts, new_teacher_atts):
-                        student_att = torch.where(student_att <= -1e2, torch.zeros_like(student_att).to(device),
-                                                  student_att)
-                        teacher_att = torch.where(teacher_att <= -1e2, torch.zeros_like(teacher_att).to(device),
-                                                  teacher_att)
+                        for student_att, teacher_att in zip(student_atts, new_teacher_atts):
+                            student_att = torch.where(student_att <= -1e2, torch.zeros_like(student_att).to(device),
+                                                    student_att)
+                            teacher_att = torch.where(teacher_att <= -1e2, torch.zeros_like(teacher_att).to(device),
+                                                    teacher_att)
 
-                        tmp_loss = loss_mse(student_att, teacher_att)
-                        att_loss += tmp_loss
+                            tmp_loss = loss_mse(student_att, teacher_att)
+                            att_loss += tmp_loss
 
-                    new_teacher_reps = [teacher_reps[i * layers_per_block] for i in range(student_layer_num + 1)]
-                    new_student_reps = student_reps
-                    for student_rep, teacher_rep in zip(new_student_reps, new_teacher_reps):
-                        tmp_loss = loss_mse(student_rep, teacher_rep)
-                        rep_loss += tmp_loss
+                        new_teacher_reps = [teacher_reps[i * layers_per_block] for i in range(student_layer_num + 1)]
+                        new_student_reps = student_reps
+                        for student_rep, teacher_rep in zip(new_student_reps, new_teacher_reps):
+                            tmp_loss = loss_mse(student_rep, teacher_rep)
+                            rep_loss += tmp_loss
 
-                    loss = rep_loss + att_loss # + vr_loss
-                    tr_att_loss += att_loss.item()
-                    tr_rep_loss += rep_loss.item()
+                        loss = rep_loss + att_loss # + vr_loss
+                        tr_att_loss += att_loss.item()
+                        tr_rep_loss += rep_loss.item()
+
+                    else:
+                        teacher_attention_dist = torch.matmul(teacher_query_layers[0],
+                        teacher_key_layers[0].transpose(-1,-2))
+                        teacher_value_relation = torch.matmul(teacher_value_layers[0],
+                                                teacher_value_layers[0].transpose(-1,-2))
+                        attention_head_size = int(args.teacher_config.hidden_size / args.teacher_config.num_attention_heads)
+                        
+                        teacher_attention_dist = teacher_attention_dist / math.sqrt(attention_head_size)
+                        teacher_attention_dist = F.log_softmax(teacher_attention_dist, dim=-1)
+                        
+                        teacher_value_relation = teacher_value_relation / math.sqrt(attention_head_size)
+                        teacher_value_relation = F.log_softmax(teacher_value_relation, dim=-1)
+            
+
+                        student_attention_dist = torch.matmul(student_query_layers[0],
+                        student_key_layers[0].transpose(-1,-2))
+                        student_value_relation = torch.matmul(student_value_layers[0],
+                                                student_value_layers[0].transpose(-1,-2))
+                        attention_head_size = int(args.student_config.hidden_size / args.student_config.num_attention_heads)
+
+                        student_attention_dist = student_attention_dist / math.sqrt(attention_head_size)
+                        student_attention_dist = F.log_softmax(student_attention_dist, dim=-1)
+
+                        student_value_relation = student_value_relation / math.sqrt(attention_head_size)
+                        student_value_relation = F.log_softmax(student_value_relation, dim=-1)
+                        
+                        scaler = 1.
+                        att_loss += loss_fct(teacher_attention_dist, student_attention_dist) / scaler
+                        vr_loss += loss_fct(teacher_value_relation, student_value_relation) / scaler
+                        loss = att_loss + vr_loss
+
+                        if args.gradient_accumulation_steps > 1:
+                            att_loss = att_loss / args.gradient_accumulation_steps
+                            vr_loss = vr_loss / args.gradient_accumulation_steps
+                            loss = loss / args.gradient_accumulation_steps
+
+                        tr_att_loss += att_loss.item()
+                        tr_vr_loss += vr_loss.item()
+
                 else:
                     if output_mode == "classification":
                         cls_loss = soft_cross_entropy(student_logits / args.temperature,
@@ -1020,6 +1081,7 @@ def main():
                     cls_loss = tr_cls_loss / (step + 1)
                     att_loss = tr_att_loss / (step + 1)
                     rep_loss = tr_rep_loss / (step + 1)
+                    vr_loss = tr_vr_loss / (step + 1)
 
                     result = {}
                     if args.pred_distill:
@@ -1029,6 +1091,7 @@ def main():
                     result['cls_loss'] = cls_loss
                     result['att_loss'] = att_loss
                     result['rep_loss'] = rep_loss
+                    result['vr_loss'] = vr_loss
                     result['loss'] = loss
 
                     result_to_file(result, output_eval_file)
