@@ -400,8 +400,7 @@ class BertSelfAttention(nn.Module):
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(
             query_layer, key_layer.transpose(-1, -2))
-        attention_scores = attention_scores / \
-            math.sqrt(self.attention_head_size)
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
         attention_scores = attention_scores + attention_mask
 
@@ -417,7 +416,7 @@ class BertSelfAttention(nn.Module):
         new_context_layer_shape = context_layer.size()[
             :-2] + (self.all_head_size,)
         context_layer = context_layer.view(*new_context_layer_shape)
-        print('last_layer_or_is_student:', last_layer_or_is_student)
+        #print('last_layer_or_is_student:', last_layer_or_is_student)
         if not last_layer_or_is_student:
             return context_layer, attention_scores
         else:
@@ -432,7 +431,7 @@ class BertAttention(nn.Module):
         self.output = BertSelfOutput(config)
 
     def forward(self, input_tensor, attention_mask, last_layer_or_is_student):
-        print('last_layer_or_is_student:', last_layer_or_is_student)
+        #print('last_layer_or_is_student:', last_layer_or_is_student)
 
         _self_output = self.self(input_tensor, attention_mask, last_layer_or_is_student=last_layer_or_is_student)
 
@@ -538,19 +537,13 @@ class BertEncoder(nn.Module):
         all_value_layers = []
         for i, layer_module in enumerate(self.layer):
             all_encoder_layers.append(hidden_states)
-            if i == len(self.layer) - 1 or is_student:
-                hidden_states, layer_att, query_layer, key_layer, value_layer = layer_module(
-                    hidden_states, attention_mask, True)
-                all_key_layers.append(query_layer)
-                all_query_layers.append(key_layer)
-                all_value_layers.append(value_layer)
-            else:
-                hidden_states, layer_att = layer_module(
-                    hidden_states, attention_mask, False)
+            hidden_states, layer_att, query_layer, key_layer, value_layer = layer_module(hidden_states, attention_mask, True)
+            all_key_layers.append(query_layer)
+            all_query_layers.append(key_layer)
+            all_value_layers.append(value_layer)
             all_encoder_atts.append(layer_att)
         all_encoder_layers.append(hidden_states)
         return all_encoder_layers, all_encoder_atts, all_query_layers, all_key_layers, all_value_layers
-
 
 class BertPooler(nn.Module):
     def __init__(self, config, recurs=None):
@@ -749,11 +742,11 @@ class BertPreTrainedModel(nn.Module):
         for old_key, new_key in zip(old_keys, new_keys):
             state_dict[new_key] = state_dict.pop(old_key)
 
-        # Fix missmatch layer name. Two situation like (BERT->TinyBERT) and (TinyBERT->TinyBERT).
+        # Fix missmatch layer name. Two situation like (BERT->TinyBERT) and (TinyBERT->TinyBERT). 
         old_keys = []
         new_keys = []
         for key in state_dict.keys():
-            if 'bert' in key:
+            if 'bert' in key or 'classifier' in key or 'fit_dense' in key:
                 new_key = key
             else:
                 new_key = 'bert.' +key
