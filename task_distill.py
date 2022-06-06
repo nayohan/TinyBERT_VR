@@ -44,7 +44,6 @@ from transformer.tokenization import BertTokenizer
 from transformer.optimization import BertAdam
 from transformer.file_utils import WEIGHTS_NAME, CONFIG_NAME
 
-os.environ["CUDA_VISIBLE_DEVICES"]="0"
 csv.field_size_limit(sys.maxsize)
 
 log_format = '%(asctime)s %(message)s'
@@ -744,8 +743,14 @@ def main():
                         type=float,
                         default=1.)
 
+    # gpu and experiment arguments
+    parser.add_argument('--gpu_no', type=str, default="0", help='select gpu number like "1" ')
+    parser.add_argument('--training_option', type=str, default="tinybert", help="set experiment setting. 'mixed', mixed_mse, mixed_v2")
+    parser.add_argument('--loss_option', type=str, help="set loss 'kl' or 'mse' ")
     args = parser.parse_args()
     logger.info('The args: {}'.format(args))
+
+    os.environ["CUDA_VISIBLE_DEVICES"]= args.gpu_no
 
     processors = {
         "cola": ColaProcessor,
@@ -924,6 +929,10 @@ def main():
             tr_att_loss = 0.
             tr_rep_loss = 0.
             tr_cls_loss = 0.
+
+            tr_qk_loss =  0.
+            tr_qr_loss = 0.
+            tr_kr_loss = 0.
             tr_vr_loss = 0.
 
             student_model.train()
@@ -972,23 +981,24 @@ def main():
                 att_loss = 0.
                 rep_loss = 0.
                 cls_loss = 0.
+
+                qk_loss = 0.
                 vr_loss = 0.
 
-                tinybert=0
+                #tinybert=args.tinybert # if set 1 using original tinybert else mixed with minilm
+                training_option = args.training_option # "tinybert", "mixed", "minilm"
+                #print('training_option:', training_option)
                 if not args.pred_distill:
-                    if tinybert:
+                    if training_option=="tinybert":
                         teacher_layer_num = len(teacher_atts)
                         student_layer_num = len(student_atts)
                         assert teacher_layer_num % student_layer_num == 0
                         layers_per_block = int(teacher_layer_num / student_layer_num)
-                        new_teacher_atts = [teacher_atts[i * layers_per_block + layers_per_block - 1]
-                                            for i in range(student_layer_num)]
+                        new_teacher_atts = [teacher_atts[i * layers_per_block + layers_per_block - 1] for i in range(student_layer_num)]
 
                         for student_att, teacher_att in zip(student_atts, new_teacher_atts):
-                            student_att = torch.where(student_att <= -1e2, torch.zeros_like(student_att).to(device),
-                                                    student_att)
-                            teacher_att = torch.where(teacher_att <= -1e2, torch.zeros_like(teacher_att).to(device),
-                                                    teacher_att)
+                            student_att = torch.where(student_att <= -1e2, torch.zeros_like(student_att).to(device), student_att)
+                            teacher_att = torch.where(teacher_att <= -1e2, torch.zeros_like(teacher_att).to(device), teacher_att)
 
                             tmp_loss = loss_mse(student_att, teacher_att)
                             att_loss += tmp_loss
@@ -1003,11 +1013,88 @@ def main():
                         tr_att_loss += att_loss.item()
                         tr_rep_loss += rep_loss.item()
 
-                    else:
-                        teacher_attention_dist = torch.matmul(teacher_query_layers[0],
-                        teacher_key_layers[0].transpose(-1,-2))
-                        teacher_value_relation = torch.matmul(teacher_value_layers[0],
-                                                teacher_value_layers[0].transpose(-1,-2))
+                    elif training_option=="mixed":
+                        # 모든레이어에 적용
+                        teacher_layer_num = len(teacher_atts)
+                        student_layer_num = len(student_atts)
+                        layers_per_block = int(teacher_layer_num / student_layer_num)
+                        new_teacher_query_layers = [teacher_query_layers[i * layers_per_block + layers_per_block - 1] for i in range(student_layer_num)]
+                        new_teacher_key_layers  = [teacher_key_layers[i * layers_per_block + layers_per_block - 1] for i in range(student_layer_num)]
+                        new_teacher_value_layers  = [teacher_value_layers[i * layers_per_block + layers_per_block - 1] for i in range(student_layer_num)]
+
+                        # print('new_teacher_query_layers:', len(new_teacher_query_layers))
+                        # print('new_teacher_query_layers[0]:', new_teacher_query_layers[-1].size())
+                        # print('new_teacher_key_layers:', len(new_teacher_key_layers))
+                        # print('new_teacher_key_layers[0]:', new_teacher_key_layers[-1].size())
+                        # print('new_teacher_value_layers:', len(new_teacher_value_layers))
+                        # print('new_teacher_value_layers[0]:', new_teacher_value_layers[-1].size())
+
+                        # 각 레이어마다 loss 계산
+                        for i, (teacher_q, teacher_k, teacher_v, student_q, student_k, student_v) in \
+                            enumerate(zip(new_teacher_query_layers, new_teacher_key_layers, new_teacher_value_layers, \
+                                student_query_layers, student_key_layers, student_value_layers)):
+
+                            # 어텐션 스코어 계산 (teacher)
+                            teacher_attention_dist = torch.matmul(teacher_q[i], teacher_k[i].transpose(-1,-2))
+                            teacher_value_relation = torch.matmul(teacher_v[i], teacher_v[i].transpose(-1,-2))
+                            attention_head_size = int(args.teacher_config.hidden_size / args.teacher_config.num_attention_heads)
+                            
+                            teacher_attention_dist = teacher_attention_dist / math.sqrt(attention_head_size)
+                            teacher_attention_dist = F.log_softmax(teacher_attention_dist, dim=-1)
+                            teacher_value_relation = teacher_value_relation / math.sqrt(attention_head_size)
+                            teacher_value_relation = F.log_softmax(teacher_value_relation, dim=-1)
+                
+                            # 어텐션 스코어 계산 (student)
+                            student_attention_dist = torch.matmul(student_q[i], student_k[i].transpose(-1,-2))
+                            student_value_relation = torch.matmul(student_v[i], student_v[i].transpose(-1,-2))
+                            attention_head_size = int(args.student_config.hidden_size / args.student_config.num_attention_heads)
+
+                            student_attention_dist = student_attention_dist / math.sqrt(attention_head_size)
+                            student_attention_dist = F.log_softmax(student_attention_dist, dim=-1)
+                            student_value_relation = student_value_relation / math.sqrt(attention_head_size)
+                            student_value_relation = F.log_softmax(student_value_relation, dim=-1)
+
+                            # teacher_attention_dist = torch.where(teacher_attention_dist <= -1e2, torch.zeros_like(teacher_attention_dist).to(device), teacher_attention_dist)
+                            # student_attention_dist = torch.where(student_attention_dist <= -1e2, torch.zeros_like(student_attention_dist).to(device), student_attention_dist)
+                            # teacher_value_relation = torch.where(teacher_value_relation <= -1e2, torch.zeros_like(teacher_value_relation).to(device), teacher_value_relation)
+                            # student_value_relation = torch.where(student_value_relation <= -1e2, torch.zeros_like(student_value_relation).to(device), student_value_relation)
+
+                            if args.loss_option=='mse':
+                                tmp_loss = loss_mse(teacher_attention_dist, student_attention_dist)
+                                tmp2_loss = loss_mse(teacher_value_relation, student_value_relation)
+                                qk_loss += tmp_loss
+                                vr_loss += tmp2_loss
+
+                            elif args.loss_option=="kl":
+                                scaler = 1.
+                                qk_loss += loss_fct(teacher_attention_dist, student_attention_dist) / scaler
+                                vr_loss += loss_fct(teacher_value_relation, student_value_relation) / scaler
+                            else:
+                                print('loss option not setted.')
+
+                        if args.loss_option=='mse':
+                            new_teacher_reps = [teacher_reps[i * layers_per_block] for i in range(student_layer_num + 1)]
+                            new_student_reps = student_reps
+                            for student_rep, teacher_rep in zip(new_student_reps, new_teacher_reps):
+                                tmp_loss = loss_mse(student_rep, teacher_rep)
+                                rep_loss += tmp_loss
+
+                            loss = rep_loss + qk_loss + vr_loss
+                            tr_qk_loss += qk_loss.item()
+                            tr_rep_loss += rep_loss.item()
+                            tr_vr_loss += vr_loss.item()
+
+                        elif args.loss_option=="kl":
+                            loss = qk_loss + vr_loss
+                            tr_qk_loss += qk_loss.item()
+                            tr_vr_loss += vr_loss.item()
+                        else:
+                            loss = 0.
+                            print('loss option not setted.')
+                  
+                    elif training_option=="minilm":
+                        teacher_attention_dist = torch.matmul(teacher_query_layers[-1], teacher_key_layers[-1].transpose(-1,-2))
+                        teacher_value_relation = torch.matmul(teacher_value_layers[-1], teacher_value_layers[-1].transpose(-1,-2))
                         attention_head_size = int(args.teacher_config.hidden_size / args.teacher_config.num_attention_heads)
                         
                         teacher_attention_dist = teacher_attention_dist / math.sqrt(attention_head_size)
@@ -1016,11 +1103,8 @@ def main():
                         teacher_value_relation = teacher_value_relation / math.sqrt(attention_head_size)
                         teacher_value_relation = F.log_softmax(teacher_value_relation, dim=-1)
             
-
-                        student_attention_dist = torch.matmul(student_query_layers[0],
-                        student_key_layers[0].transpose(-1,-2))
-                        student_value_relation = torch.matmul(student_value_layers[0],
-                                                student_value_layers[0].transpose(-1,-2))
+                        student_attention_dist = torch.matmul(student_query_layers[-1], student_key_layers[-1].transpose(-1,-2))
+                        student_value_relation = torch.matmul(student_value_layers[-1], student_value_layers[-1].transpose(-1,-2))
                         attention_head_size = int(args.student_config.hidden_size / args.student_config.num_attention_heads)
 
                         student_attention_dist = student_attention_dist / math.sqrt(attention_head_size)
@@ -1042,6 +1126,9 @@ def main():
                         tr_att_loss += att_loss.item()
                         tr_vr_loss += vr_loss.item()
 
+                    else:
+                        loss = 0.
+                        print('training option not setted.')
                 else:
                     if output_mode == "classification":
                         cls_loss = soft_cross_entropy(student_logits / args.temperature,
@@ -1081,6 +1168,9 @@ def main():
                     cls_loss = tr_cls_loss / (step + 1)
                     att_loss = tr_att_loss / (step + 1)
                     rep_loss = tr_rep_loss / (step + 1)
+                    qk_loss = tr_qk_loss / (step + 1)
+                    qr_loss = tr_qr_loss / (step + 1)
+                    kr_loss = tr_kr_loss / (step + 1)
                     vr_loss = tr_vr_loss / (step + 1)
 
                     result = {}
@@ -1091,6 +1181,9 @@ def main():
                     result['cls_loss'] = cls_loss
                     result['att_loss'] = att_loss
                     result['rep_loss'] = rep_loss
+                    result['qk_loss'] = qk_loss
+                    result['qr_loss'] = qr_loss
+                    result['kr_loss'] = kr_loss
                     result['vr_loss'] = vr_loss
                     result['loss'] = loss
 
@@ -1167,6 +1260,9 @@ def main():
 
                     student_model.train()
 
+    print(args.training_option, args.loss_option, args.gpu_no)    
+
 
 if __name__ == "__main__":
+
     main()
