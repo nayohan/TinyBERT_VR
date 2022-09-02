@@ -34,8 +34,6 @@ import  torch.nn.functional as F
 from torch.utils.data import (DataLoader, RandomSampler, SequentialSampler,
                               TensorDataset)
 from tqdm import tqdm, trange
-import wandb
-
 
 from torch.nn import CrossEntropyLoss, MSELoss, KLDivLoss
 from scipy.stats import pearsonr, spearmanr
@@ -748,24 +746,11 @@ def main():
     # gpu and experiment arguments
     parser.add_argument('--gpu_no', type=str, default="0", help='select gpu number like "1" ')
     parser.add_argument('--training_option', type=str, default="tinybert", help="set experiment setting. 'mixed', mixed_mse, mixed_v2")
-    parser.add_argument('--loss_option', type=str, help="set loss 'kl' or 'mse' ")
-    parser.add_argument('--finetuning_label', type=str, default=False, help="if you want only finetuning student model")
-    parser.add_argument('--layer', default="None", type=str, help='select 6l or 4l  ')
+
     args = parser.parse_args()
     logger.info('The args: {}'.format(args))
 
     os.environ["CUDA_VISIBLE_DEVICES"]= args.gpu_no
-
-    if args.pred_distill:
-        wandb.init(
-                    project='tinybert_vr', 
-                    entity="nudago", 
-                    name=f"{args.task_name}_{args.layer}_{args.training_option}_{args.loss_option}_{args.gpu_no}_{args.finetuning_label}",
-                    tags=[args.task_name, str(args.layer), args.training_option, args.loss_option, args.gpu_no, str(args.finetuning_label), "general_bert_finetune"],
-                    config=args,
-                    group=f"{args.layer}_{args.finetuning_label}",
-                    allow_val_change=True
-            )
 
     processors = {
         "cola": ColaProcessor,
@@ -877,10 +862,10 @@ def main():
     eval_sampler = SequentialSampler(eval_data)
     eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
-    # if not args.do_eval:
-    #     teacher_model = TinyBertForSequenceClassification.from_pretrained(args.teacher_model, num_labels=num_labels)
-    #     teacher_model.to(device)
-    #     args.teacher_config = teacher_model.config
+    if not args.do_eval:
+        teacher_model = TinyBertForSequenceClassification.from_pretrained(args.teacher_model, num_labels=num_labels)
+        teacher_model.to(device)
+        args.teacher_config = teacher_model.config
 
     student_model = TinyBertForSequenceClassification.from_pretrained(args.student_model, num_labels=num_labels)
     student_model.to(device)
@@ -976,9 +961,9 @@ def main():
                 # print('student_value_layers:', len(student_value_layers))
                 # print('student_value_layers[0]:', student_value_layers[0].size())
 
-                # with torch.no_grad():
-                #     teacher_logits, teacher_atts, teacher_reps, teacher_query_layers, teacher_key_layers, teacher_value_layers = \
-                #         teacher_model(input_ids, segment_ids, input_mask)
+                with torch.no_grad():
+                    teacher_logits, teacher_atts, teacher_reps, teacher_query_layers, teacher_key_layers, teacher_value_layers = \
+                        teacher_model(input_ids, segment_ids, input_mask)
 
                 # print('teacher_logits:', teacher_logits.size())
                 # print('teacher_atts:', len(teacher_atts))
@@ -1012,8 +997,10 @@ def main():
                         new_teacher_atts = [teacher_atts[i * layers_per_block + layers_per_block - 1] for i in range(student_layer_num)]
 
                         for student_att, teacher_att in zip(student_atts, new_teacher_atts):
-                            student_att = torch.where(student_att <= -1e2, torch.zeros_like(student_att).to(device), student_att)
-                            teacher_att = torch.where(teacher_att <= -1e2, torch.zeros_like(teacher_att).to(device), teacher_att)
+                            student_att = torch.where(student_att <= -1e2, torch.zeros_like(student_att).to(device),
+                                                    student_att)
+                            teacher_att = torch.where(teacher_att <= -1e2, torch.zeros_like(teacher_att).to(device),
+                                                    teacher_att)
 
                             tmp_loss = loss_mse(student_att, teacher_att)
                             att_loss += tmp_loss
@@ -1028,7 +1015,8 @@ def main():
                         tr_att_loss += att_loss.item()
                         tr_rep_loss += rep_loss.item()
 
-                    elif training_option=="mixed":
+                    #elif training_option=="mixed":
+                    else:
                         # 모든레이어에 적용
                         teacher_layer_num = len(teacher_atts)
                         student_layer_num = len(student_atts)
@@ -1069,94 +1057,85 @@ def main():
                             student_value_relation = student_value_relation / math.sqrt(attention_head_size)
                             student_value_relation = F.log_softmax(student_value_relation, dim=-1)
 
-                            # teacher_attention_dist = torch.where(teacher_attention_dist <= -1e2, torch.zeros_like(teacher_attention_dist).to(device), teacher_attention_dist)
-                            # student_attention_dist = torch.where(student_attention_dist <= -1e2, torch.zeros_like(student_attention_dist).to(device), student_attention_dist)
-                            # teacher_value_relation = torch.where(teacher_value_relation <= -1e2, torch.zeros_like(teacher_value_relation).to(device), teacher_value_relation)
-                            # student_value_relation = torch.where(student_value_relation <= -1e2, torch.zeros_like(student_value_relation).to(device), student_value_relation)
 
-                            if args.loss_option=='mse':
-                                tmp_loss = loss_mse(teacher_attention_dist, student_attention_dist)
-                                tmp2_loss = loss_mse(teacher_value_relation, student_value_relation)
-                                qk_loss += tmp_loss
-                                vr_loss += tmp2_loss
+                            teacher_attention_dist = torch.where(teacher_attention_dist <= -1e2, torch.zeros_like(teacher_attention_dist).to(device), teacher_attention_dist)
+                            student_attention_dist = torch.where(student_attention_dist <= -1e2, torch.zeros_like(student_attention_dist).to(device), student_attention_dist)
+                            teacher_value_relation = torch.where(teacher_value_relation <= -1e2, torch.zeros_like(teacher_value_relation).to(device), teacher_value_relation)
+                            student_value_relation = torch.where(student_value_relation <= -1e2, torch.zeros_like(student_value_relation).to(device), student_value_relation)
 
-                            elif args.loss_option=="kl":
-                                scaler = 1.
-                                qk_loss += loss_fct(teacher_attention_dist, student_attention_dist) / scaler
-                                vr_loss += loss_fct(teacher_value_relation, student_value_relation) / scaler
-                            else:
-                                print('loss option not setted.')
-
-                        if args.loss_option=='mse':
-                            new_teacher_reps = [teacher_reps[i * layers_per_block] for i in range(student_layer_num + 1)]
-                            new_student_reps = student_reps
-                            for student_rep, teacher_rep in zip(new_student_reps, new_teacher_reps):
-                                tmp_loss = loss_mse(student_rep, teacher_rep)
-                                rep_loss += tmp_loss
-
-                            loss = rep_loss + qk_loss + vr_loss
-                            tr_qk_loss += qk_loss.item()
-                            tr_rep_loss += rep_loss.item()
-                            tr_vr_loss += vr_loss.item()
-
-                        elif args.loss_option=="kl":
-                            loss = qk_loss + vr_loss
-                            tr_qk_loss += qk_loss.item()
-                            tr_vr_loss += vr_loss.item()
-                        else:
-                            loss = 0.
-                            print('loss option not setted.')
-                  
-                    elif training_option=="minilm":
-                        teacher_attention_dist = torch.matmul(teacher_query_layers[-1], teacher_key_layers[-1].transpose(-1,-2))
-                        teacher_value_relation = torch.matmul(teacher_value_layers[-1], teacher_value_layers[-1].transpose(-1,-2))
-                        attention_head_size = int(args.teacher_config.hidden_size / args.teacher_config.num_attention_heads)
+                            tmp_loss = loss_mse(teacher_attention_dist, student_attention_dist)
+                            tmp2_loss = loss_mse(teacher_value_relation, student_value_relation)
+                            qk_loss += tmp_loss
+                            vr_loss += tmp2_loss
                         
-                        teacher_attention_dist = teacher_attention_dist / math.sqrt(attention_head_size)
-                        teacher_attention_dist = F.log_softmax(teacher_attention_dist, dim=-1)
-                        
-                        teacher_value_relation = teacher_value_relation / math.sqrt(attention_head_size)
-                        teacher_value_relation = F.log_softmax(teacher_value_relation, dim=-1)
-            
-                        student_attention_dist = torch.matmul(student_query_layers[-1], student_key_layers[-1].transpose(-1,-2))
-                        student_value_relation = torch.matmul(student_value_layers[-1], student_value_layers[-1].transpose(-1,-2))
-                        attention_head_size = int(args.student_config.hidden_size / args.student_config.num_attention_heads)
+                        new_teacher_reps = [teacher_reps[i * layers_per_block] for i in range(student_layer_num + 1)]
+                        new_student_reps = student_reps
+                        for student_rep, teacher_rep in zip(new_student_reps, new_teacher_reps):
+                            tmp_loss = loss_mse(student_rep, teacher_rep)
+                            rep_loss += tmp_loss
 
-                        student_attention_dist = student_attention_dist / math.sqrt(attention_head_size)
-                        student_attention_dist = F.log_softmax(student_attention_dist, dim=-1)
-
-                        student_value_relation = student_value_relation / math.sqrt(attention_head_size)
-                        student_value_relation = F.log_softmax(student_value_relation, dim=-1)
-                        
-                        scaler = 1.
-                        att_loss += loss_fct(teacher_attention_dist, student_attention_dist) / scaler
-                        vr_loss += loss_fct(teacher_value_relation, student_value_relation) / scaler
-                        loss = att_loss + vr_loss
-
-                        if args.gradient_accumulation_steps > 1:
-                            att_loss = att_loss / args.gradient_accumulation_steps
-                            vr_loss = vr_loss / args.gradient_accumulation_steps
-                            loss = loss / args.gradient_accumulation_steps
-
-                        tr_att_loss += att_loss.item()
+                        loss = rep_loss + qk_loss + vr_loss
+                        tr_qk_loss += qk_loss.item()
+                        tr_rep_loss += rep_loss.item()
                         tr_vr_loss += vr_loss.item()
+            
+                        # scaler = 1.
+                        # att_loss += loss_fct(teacher_attention_dist, student_attention_dist) / scaler
+                        # vr_loss += loss_fct(teacher_value_relation, student_value_relation) / scaler
+                        # loss = att_loss + vr_loss
 
-                    else:
-                        loss = 0.
-                        print('training option not setted.')
+                        # if args.gradient_accumulation_steps > 1:
+                        #     att_loss = att_loss / args.gradient_accumulation_steps
+                        #     vr_loss = vr_loss / args.gradient_accumulation_steps
+                        #     loss = loss / args.gradient_accumulation_steps
+
+                        # tr_att_loss += att_loss.item()
+                        # tr_vr_loss += vr_loss.item()
+
+                    #elif training_option=="minilm":
+                    # else:
+                    #     teacher_attention_dist = torch.matmul(teacher_query_layers[0],
+                    #     teacher_key_layers[0].transpose(-1,-2))
+                    #     teacher_value_relation = torch.matmul(teacher_value_layers[0],
+                    #                             teacher_value_layers[0].transpose(-1,-2))
+                    #     attention_head_size = int(args.teacher_config.hidden_size / args.teacher_config.num_attention_heads)
+                        
+                    #     teacher_attention_dist = teacher_attention_dist / math.sqrt(attention_head_size)
+                    #     teacher_attention_dist = F.log_softmax(teacher_attention_dist, dim=-1)
+                        
+                    #     teacher_value_relation = teacher_value_relation / math.sqrt(attention_head_size)
+                    #     teacher_value_relation = F.log_softmax(teacher_value_relation, dim=-1)
+            
+
+                    #     student_attention_dist = torch.matmul(student_query_layers[0],
+                    #     student_key_layers[0].transpose(-1,-2))
+                    #     student_value_relation = torch.matmul(student_value_layers[0],
+                    #                             student_value_layers[0].transpose(-1,-2))
+                    #     attention_head_size = int(args.student_config.hidden_size / args.student_config.num_attention_heads)
+
+                    #     student_attention_dist = student_attention_dist / math.sqrt(attention_head_size)
+                    #     student_attention_dist = F.log_softmax(student_attention_dist, dim=-1)
+
+                    #     student_value_relation = student_value_relation / math.sqrt(attention_head_size)
+                    #     student_value_relation = F.log_softmax(student_value_relation, dim=-1)
+                        
+                    #     scaler = 1.
+                    #     att_loss += loss_fct(teacher_attention_dist, student_attention_dist) / scaler
+                    #     vr_loss += loss_fct(teacher_value_relation, student_value_relation) / scaler
+                    #     loss = att_loss + vr_loss
+
+                    #     if args.gradient_accumulation_steps > 1:
+                    #         att_loss = att_loss / args.gradient_accumulation_steps
+                    #         vr_loss = vr_loss / args.gradient_accumulation_steps
+                    #         loss = loss / args.gradient_accumulation_steps
+
+                    #     tr_att_loss += att_loss.item()
+                    #     tr_vr_loss += vr_loss.item()
+
                 else:
-                    #print(args.finetuning_label)
                     if output_mode == "classification":
-                        if args.finetuning_label=="label":
-                            fct_loss = CrossEntropyLoss()
-                            cls_loss = fct_loss(student_logits, label_ids)
-                        else:
-                            #fct_loss = CrossEntropyLoss()
-                            #cls_loss = fct_loss(student_logits, teacher_logits)
-                            cls_loss = soft_cross_entropy(student_logits / args.temperature,teacher_logits / args.temperature)
-                            # print('student_logits:', student_logits.argmax(1))
-                            # print('label_logits:', label_ids)
-
+                        cls_loss = soft_cross_entropy(student_logits / args.temperature,
+                                                      teacher_logits / args.temperature)
                     elif output_mode == "regression":
                         loss_mse = MSELoss()
                         cls_loss = loss_mse(student_logits.view(-1), label_ids.view(-1))
@@ -1212,8 +1191,7 @@ def main():
                     result['loss'] = loss
 
                     result_to_file(result, output_eval_file)
-                    if args.pred_distill:
-                        wandb.log(result)
+
                     if not args.pred_distill:
                         save_model = True
                     else:
@@ -1284,8 +1262,6 @@ def main():
                             mox.file.copy_parallel('.', args.data_url)
 
                     student_model.train()
-
-    print(args.training_option, args.loss_option, args.gpu_no)    
 
 
 if __name__ == "__main__":
