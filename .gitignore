@@ -15,3 +15,6 @@ eval_*.txt
 
 # pycache
 __pycache__
+
+# temp_folder
+Pytorch-MiniLM/
