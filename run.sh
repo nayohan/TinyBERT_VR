@@ -20,9 +20,9 @@ FT_BERT_BASE_DIR='/home/uj-user/TinyBERT_VR/bert-base-uncased-SST-2'
 GENERAL_TINYBERT_DIR='/home/uj-user/TinyBERT_VR/tiny-bert'
 TASK_DIR='/home/uj-user/TinyBERT_VR/glue_data/SST-2'
 TASK_NAME='sst-2'
-TMP_TINYBERT_DIR='/home/uj-user/TinyBERT_VR/tiny-bert-SST-2-tmp-mini'
-TINYBERT_DIR='/home/uj-user/TinyBERT_VR/tiny-bert-SST-2-mini'
-OUTPUT_DIR='/home/uj-user/TinyBERT_VR/output_SST-2-lm'
+TMP_TINYBERT_DIR='/home/uj-user/TinyBERT_VR/tiny-bert-SST-2-mixed-tmp'
+TINYBERT_DIR='/home/uj-user/TinyBERT_VR/tiny-bert-SST-2-mixed'
+OUTPUT_DIR='/home/uj-user/TinyBERT_VR/output_SST-2-mixed'
 
 # FT_BERT_BASE_DIR='/home/uj-user/TinyBERT_VR/bert-base-uncased'
 # GENERAL_TINYBERT_DIR='/home/uj-user/TinyBERT_VR/tiny-bert'
@@ -42,16 +42,16 @@ OUTPUT_DIR='/home/uj-user/TinyBERT_VR/output_SST-2-lm'
 
 
 # 3. Finetune TinyBERT + Layer Distillation
-python task_distill.py --teacher_model ${FT_BERT_BASE_DIR} \
-                       --student_model ${GENERAL_TINYBERT_DIR} \
-                       --data_dir ${TASK_DIR} \
-                       --task_name ${TASK_NAME} \
-                       --output_dir ${TMP_TINYBERT_DIR} \
-                       --max_seq_length 128 \
-                       --train_batch_size 128 \
-                       --num_train_epochs 10 \
-                       --do_lower_case
-
+# python task_distill.py --teacher_model ${FT_BERT_BASE_DIR} \
+#                        --student_model ${GENERAL_TINYBERT_DIR} \
+#                        --data_dir ${TASK_DIR} \
+#                        --task_name ${TASK_NAME} \
+#                        --output_dir ${TMP_TINYBERT_DIR} \
+#                        --max_seq_length 128 \
+#                        --train_batch_size 128 \
+#                        --num_train_epochs 10 \
+#                        --do_lower_case \
+#                        --training_option mixed
 
 # 4. Finetune TinyBERT + Predction Layer
 python task_distill.py --pred_distill \
@@ -65,7 +65,7 @@ python task_distill.py --pred_distill \
                        --num_train_epochs  10  \
                        --eval_step 100 \
                        --max_seq_length 128 \
-                       --train_batch_size 256
+                       --train_batch_size 128
 
 #                        --aug_train \
 
